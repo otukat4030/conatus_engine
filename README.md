@@ -1,85 +1,208 @@
 # Conatus Engine
 
-Python学習を兼ねて、スピノザ『エチカ』第三部の概念を小さなプログラムへ翻訳するための実験用プロジェクトです。
+Conatus Engine is a small Python study project for experimenting with concepts
+in Spinoza's *Ethics*, especially Part III. It is not a complete formalization
+and should not be read as the only correct interpretation of Spinoza. The code
+is a provisional learning and research model that makes its current assumptions
+explicit.
 
-このプロジェクトは、第三部の完全な解釈を最初から実装するものではありません。現在のコードは、精読を始めるための暫定モデルです。今後の読解によって、データモデル、関数、判定規則、用語の対応関係を修正していく前提です。
+Version `0.3.0` moves the project from a single encounter classifier to a small
+state transition engine with a derivation trace.
 
-## 現在の鋳型
+## What Changed
 
-- `Person`: 人物名と現在の力能
-- `Encounter`: 出会った出来事、力能の変化量、原因理解の十分性
-- `Affect`: `joy`, `sadness`, `neutral`
-- `Mode`: `active`, `passive`
-- `evaluate_encounter`: 出会いによる力能変化を評価するドメイン関数
+The model now separates two ideas that were previously mixed together:
 
-CLIの入出力は `conatus_engine/cli.py`、概念モデルと判定規則は `conatus_engine/models.py` に分けています。将来WebアプリやGUIへ拡張する場合も、まずドメインロジックを再利用できます。
+- `CausalAdequacy`: whether the result can be sufficiently explained from the
+  agent's own nature and power.
+- `IdeaAdequacy`: whether the agent sufficiently understands the causes of the
+  event.
 
-## 暫定的な判定規則
+Active and passive modes are classified only from `CausalAdequacy`:
 
-- 力能が増加した場合は `joy`
-- 力能が減少した場合は `sadness`
-- 力能が変化しない場合は `neutral`
-- 原因が十分な場合は `active`
-- 原因が不十分な場合は `passive`
+- `adequate` causal adequacy -> `active`
+- `partial` causal adequacy -> `passive`
 
-## 実行方法
+`IdeaAdequacy` is recorded independently. This means the engine can represent a
+case where an agent understands the causes of an external event but is still not
+the sufficient cause of that result.
 
-Python 3.12以降を使います。
+## Core Models
+
+- `AgentState`: the state of one agent at a point in time.
+- `WorldEvent`: an event that changes the agent's power.
+- `Transition`: the before/after result of applying one event to one state.
+- `Derivation`: one recorded rule application explaining part of the result.
+
+At this stage, `power_delta` is still provided as input. The engine does not yet
+calculate a change in power from the event itself. Power is also represented as
+an unrestricted finite real number, including negative values. Both choices are
+temporary modeling decisions and will likely be revised later.
+
+## Python API
+
+```python
+from conatus_engine import (
+    AgentState,
+    CausalAdequacy,
+    IdeaAdequacy,
+    WorldEvent,
+    step,
+)
+
+state = AgentState(agent_id="agent-1", name="Spinoza", power=10.0)
+event = WorldEvent(
+    event_id="event-1",
+    description="A clear but externally caused event",
+    power_delta=-2.0,
+    causal_adequacy=CausalAdequacy.PARTIAL,
+    idea_adequacy=IdeaAdequacy.ADEQUATE,
+)
+
+transition = step(state, event)
+
+assert transition.before == state
+assert transition.after.power == 8.0
+assert transition.affect.value == "sadness"
+assert transition.mode.value == "passive"
+assert transition.idea_adequacy.value == "adequate"
+assert len(transition.derivations) >= 4
+```
+
+You can also use the small engine wrapper:
+
+```python
+from conatus_engine import ConatusEngine
+
+transition = ConatusEngine().step(state, event)
+```
+
+## JSON
+
+`AgentState`, `WorldEvent`, and `Transition` support JSON-compatible
+dictionaries and JSON strings:
+
+```python
+data = transition.to_dict()
+json_text = transition.to_json()
+restored = transition.from_json(json_text)
+assert restored == transition
+```
+
+Example transition JSON:
+
+```json
+{
+  "before": {"agent_id": "agent-1", "name": "Spinoza", "power": 10.0},
+  "after": {"agent_id": "agent-1", "name": "Spinoza", "power": 8.0},
+  "event": {
+    "event_id": "event-1",
+    "description": "A clear but externally caused event",
+    "power_delta": -2.0,
+    "causal_adequacy": "partial",
+    "idea_adequacy": "adequate"
+  },
+  "affect": "sadness",
+  "mode": "passive",
+  "idea_adequacy": "adequate",
+  "derivations": [
+    {
+      "rule_id": "power.update",
+      "premises": ["before.power=10.0", "event.power_delta=-2.0"],
+      "conclusion": "after.power=8.0",
+      "explanation": "現段階では、出来事に与えられた力能変化量を現在の力能に加算します。"
+    }
+  ]
+}
+```
+
+## CLI
+
+Run the CLI with:
 
 ```bash
 python -m conatus_engine
 ```
 
-インストールしてコマンドとして実行する場合:
+or after installing the package:
 
 ```bash
 pip install -e .
 conatus-engine
 ```
 
-## 実行例
+The CLI first asks for an initial `AgentState` by requesting the agent's name
+and current power. It uses the entered name as the internal `agent_id`, so you
+only need to provide one identifier. It then enters an event loop: each
+`WorldEvent` is applied to the current state, the transition is displayed, and
+the resulting `after` state becomes the next current state. This makes the
+state transition model visible from the command line.
 
+For each event, the CLI asks separately whether the result is sufficiently
+explained by the agent's own nature and power, and whether the agent sufficiently
+understands the causes of the event.
+
+Example:
+
+```text
+人物名: Spinoza
+現在の力能: 10
+
+--- 現在の状態: Spinoza / power=10.0 ---
+新しい出来事を入力しますか？ (y/n): y
+イベントID: event-1
+出来事の説明: 外的な出来事の原因を正しく理解した
+出来事による力能の変化量: -2
+この結果は、その人物自身の本性・力から十分に説明できますか？ (y/n): n
+その人物は、出来事の原因を十分に理解していますか？ (y/n): y
 ```
-PS E:\Documents\conatus_engine> uv run python -m conatus_engine
-Conatus Engine
-『エチカ』第三部をPythonで読むための暫定モデルです。
 
-人物名: 岸本    
-現在の力能: 0
-出会った出来事の説明: ベッドから立ち上がってスマホを見ようとしたら首がピキっといった。
-出会いによる力能の変化量: -100
-その出来事の原因を十分に理解していますか？ (y/n): y
+The output includes before/after power, affect, active/passive mode, causal
+adequacy, idea adequacy, and the derivation history. When you continue, the next
+event starts from the latest `after.power`.
 
-=== Conatus Engine Result ===
-人物名: 岸本
-出来事: ベッドから立ち上がってスマホを見ようとしたら首がピキっといった。
-変化前の力能: 0.0
-変化後の力能: -100.0
-力能の変化量: -100.0
-affect: sadness
-mode: active
-説明: 力能が減少したため、暫定的に悲しみと判定しました。原因を十分に理解しているため、能動としました。これは第三部の学習開始時点の仮モデルです。
-```
+## Validation
 
-## テスト
+The models reject empty IDs and names. Power values and power deltas must be
+finite numbers; `NaN`, positive infinity, and negative infinity raise
+`ValueError`.
 
-開発用依存関係として `pytest` を使います。
+## Tests
+
+Development dependencies are optional:
 
 ```bash
 pip install -e ".[dev]"
 pytest
 ```
 
-## プロジェクト構成
+## Current Limits
+
+- The engine does not infer `power_delta`; it evaluates an already supplied
+  change in power.
+- Power has no upper or lower bound in this version.
+- Only joy, sadness, and neutrality are modeled.
+- Active/passive mode is based on the provisional causal adequacy rule above.
+- The derivation rule IDs are stable placeholders, not guessed proposition
+  numbers from the *Ethics*.
+
+Future versions may calculate power changes from richer event descriptions and
+may add love, hatred, hope, fear, imitation of affects, and other concepts.
+
+## Project Structure
 
 ```text
 conatus_engine/
   __init__.py
   __main__.py
   cli.py
+  engine.py
   models.py
+  serialization.py
 tests/
+  test_engine.py
   test_models.py
+  test_serialization.py
 pyproject.toml
 README.md
 ```

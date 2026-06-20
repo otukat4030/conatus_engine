@@ -1,6 +1,6 @@
 [project]
 name = "conatus-engine"
-version = "0.1.0"
+version = "0.3.0"
 description = "A small command-line study project translating concepts from Spinoza's Ethics Part III into Python models."
 readme = "README.md"
 requires-python = ">=3.12"

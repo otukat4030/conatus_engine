@@ -1,18 +1,16 @@
-"""Domain models for Conatus Engine.
-
-このモジュールはCLIの入出力から独立したドメインロジックです。
-『エチカ』第三部の精読が進むにつれて、ここにある概念対応と判定規則は
-より精密なものへ修正していく想定です。
-"""
+"""Core data models for the provisional Conatus Engine."""
 
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 
 class Affect(str, Enum):
-    """力能の増減から暫定的に判定する感情の種類."""
+    """A provisional affect classified from a change in power."""
 
     JOY = "joy"
     SADNESS = "sadness"
@@ -20,100 +18,210 @@ class Affect(str, Enum):
 
 
 class Mode(str, Enum):
-    """原因理解の十分性から暫定的に判定する能動・受動の様態."""
+    """Whether an event is active or passive in the current model."""
 
     ACTIVE = "active"
     PASSIVE = "passive"
 
 
-@dataclass(frozen=True)
-class Person:
-    """人物と、その時点での身体の活動能力・力能."""
+class CausalAdequacy(str, Enum):
+    """Whether the result is sufficiently explained by the agent's own power."""
 
+    ADEQUATE = "adequate"
+    PARTIAL = "partial"
+
+
+class IdeaAdequacy(str, Enum):
+    """Whether the agent sufficiently understands the event's causes."""
+
+    ADEQUATE = "adequate"
+    INADEQUATE = "inadequate"
+
+
+def _require_text(value: str, field_name: str) -> None:
+    if not value:
+        raise ValueError(f"{field_name} must not be empty")
+
+
+def _require_finite(value: float, field_name: str) -> None:
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be a finite number")
+
+
+@dataclass(frozen=True)
+class AgentState:
+    """A person's state at one point in the simulation."""
+
+    agent_id: str
     name: str
     power: float
 
+    def __post_init__(self) -> None:
+        _require_text(self.agent_id, "agent_id")
+        _require_text(self.name, "name")
+        _require_finite(self.power, "power")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible dictionary."""
+
+        return {"agent_id": self.agent_id, "name": self.name, "power": self.power}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AgentState:
+        """Restore an agent state from a dictionary."""
+
+        return cls(
+            agent_id=str(data["agent_id"]),
+            name=str(data["name"]),
+            power=float(data["power"]),
+        )
+
+    def to_json(self) -> str:
+        """Serialize the state to a JSON string."""
+
+        return json.dumps(self.to_dict(), ensure_ascii=False)
+
+    @classmethod
+    def from_json(cls, value: str) -> AgentState:
+        """Restore an agent state from a JSON string."""
+
+        return cls.from_dict(json.loads(value))
+
 
 @dataclass(frozen=True)
-class Encounter:
-    """人物が出会った出来事と、その出来事が力能に与える変化.
+class WorldEvent:
+    """An event that changes an agent's power in this provisional model."""
 
-    sufficient_cause は「出来事の原因を十分に理解しているか」を表します。
-    ここでの対応づけは学習用の暫定モデルであり、第三部の完全な解釈では
-    ありません。
-    """
-
+    event_id: str
     description: str
     power_delta: float
-    sufficient_cause: bool
+    causal_adequacy: CausalAdequacy
+    idea_adequacy: IdeaAdequacy
+
+    def __post_init__(self) -> None:
+        _require_text(self.event_id, "event_id")
+        _require_text(self.description, "description")
+        _require_finite(self.power_delta, "power_delta")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible dictionary."""
+
+        return {
+            "event_id": self.event_id,
+            "description": self.description,
+            "power_delta": self.power_delta,
+            "causal_adequacy": self.causal_adequacy.value,
+            "idea_adequacy": self.idea_adequacy.value,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> WorldEvent:
+        """Restore a world event from a dictionary."""
+
+        return cls(
+            event_id=str(data["event_id"]),
+            description=str(data["description"]),
+            power_delta=float(data["power_delta"]),
+            causal_adequacy=CausalAdequacy(data["causal_adequacy"]),
+            idea_adequacy=IdeaAdequacy(data["idea_adequacy"]),
+        )
+
+    def to_json(self) -> str:
+        """Serialize the event to a JSON string."""
+
+        return json.dumps(self.to_dict(), ensure_ascii=False)
+
+    @classmethod
+    def from_json(cls, value: str) -> WorldEvent:
+        """Restore a world event from a JSON string."""
+
+        return cls.from_dict(json.loads(value))
 
 
 @dataclass(frozen=True)
-class EncounterResult:
-    """出会いを評価した結果.
+class Derivation:
+    """A single rule application in a transition trace."""
 
-    CLIや将来のWeb/GUIは、この結果を表示形式に変換するだけにします。
-    """
-
-    person_name: str
-    event_description: str
-    before_power: float
-    after_power: float
-    power_delta: float
-    affect: Affect
-    mode: Mode
+    rule_id: str
+    premises: tuple[str, ...]
+    conclusion: str
     explanation: str
 
+    def __post_init__(self) -> None:
+        _require_text(self.rule_id, "rule_id")
+        _require_text(self.conclusion, "conclusion")
+        _require_text(self.explanation, "explanation")
 
-def classify_affect(power_delta: float) -> Affect:
-    """力能の変化量から、喜び・悲しみ・中立を暫定的に判定する."""
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible dictionary."""
 
-    if power_delta > 0:
-        return Affect.JOY
-    if power_delta < 0:
-        return Affect.SADNESS
-    return Affect.NEUTRAL
+        return {
+            "rule_id": self.rule_id,
+            "premises": list(self.premises),
+            "conclusion": self.conclusion,
+            "explanation": self.explanation,
+        }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Derivation:
+        """Restore a derivation from a dictionary."""
 
-def classify_mode(sufficient_cause: bool) -> Mode:
-    """原因理解の十分性から、能動・受動を暫定的に判定する."""
-
-    if sufficient_cause:
-        return Mode.ACTIVE
-    return Mode.PASSIVE
-
-
-def build_explanation(affect: Affect, mode: Mode) -> str:
-    """暫定判定についての短い日本語説明を作る."""
-
-    affect_text = {
-        Affect.JOY: "力能が増加したため、暫定的に喜びと判定しました。",
-        Affect.SADNESS: "力能が減少したため、暫定的に悲しみと判定しました。",
-        Affect.NEUTRAL: "力能が変化しないため、暫定的に中立と判定しました。",
-    }[affect]
-
-    mode_text = {
-        Mode.ACTIVE: "原因を十分に理解しているため、能動としました。",
-        Mode.PASSIVE: "原因の理解が不十分なため、受動としました。",
-    }[mode]
-
-    return f"{affect_text}{mode_text}これは第三部の学習開始時点の仮モデルです。"
+        return cls(
+            rule_id=str(data["rule_id"]),
+            premises=tuple(str(item) for item in data["premises"]),
+            conclusion=str(data["conclusion"]),
+            explanation=str(data["explanation"]),
+        )
 
 
-def evaluate_encounter(person: Person, encounter: Encounter) -> EncounterResult:
-    """人物と出会いから、力能変化・感情・能動/受動を評価する."""
+@dataclass(frozen=True)
+class Transition:
+    """The result of applying one world event to one agent state."""
 
-    affect = classify_affect(encounter.power_delta)
-    mode = classify_mode(encounter.sufficient_cause)
-    after_power = person.power + encounter.power_delta
+    before: AgentState
+    after: AgentState
+    event: WorldEvent
+    affect: Affect
+    mode: Mode
+    idea_adequacy: IdeaAdequacy
+    derivations: tuple[Derivation, ...]
 
-    return EncounterResult(
-        person_name=person.name,
-        event_description=encounter.description,
-        before_power=person.power,
-        after_power=after_power,
-        power_delta=encounter.power_delta,
-        affect=affect,
-        mode=mode,
-        explanation=build_explanation(affect, mode),
-    )
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible dictionary."""
+
+        return {
+            "before": self.before.to_dict(),
+            "after": self.after.to_dict(),
+            "event": self.event.to_dict(),
+            "affect": self.affect.value,
+            "mode": self.mode.value,
+            "idea_adequacy": self.idea_adequacy.value,
+            "derivations": [item.to_dict() for item in self.derivations],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Transition:
+        """Restore a transition from a dictionary."""
+
+        return cls(
+            before=AgentState.from_dict(data["before"]),
+            after=AgentState.from_dict(data["after"]),
+            event=WorldEvent.from_dict(data["event"]),
+            affect=Affect(data["affect"]),
+            mode=Mode(data["mode"]),
+            idea_adequacy=IdeaAdequacy(data["idea_adequacy"]),
+            derivations=tuple(
+                Derivation.from_dict(item) for item in data["derivations"]
+            ),
+        )
+
+    def to_json(self) -> str:
+        """Serialize the transition to a JSON string."""
+
+        return json.dumps(self.to_dict(), ensure_ascii=False)
+
+    @classmethod
+    def from_json(cls, value: str) -> Transition:
+        """Restore a transition from a JSON string."""
+
+        return cls.from_dict(json.loads(value))

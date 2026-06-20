@@ -1,17 +1,28 @@
-"""Conatus Engine.
+"""A provisional state transition engine for studying conatus concepts."""
 
-『エチカ』第三部の概念をPythonで学ぶための実験用パッケージです。
-
-このモデルは学習開始時点の暫定的な対応づけです。今後の精読に
-よって、データ構造・関数名・判定規則は修正される前提です。
-"""
-
-from conatus_engine.models import Affect, Encounter, Mode, Person, evaluate_encounter
+from conatus_engine.engine import ConatusEngine, classify_affect, classify_mode, step
+from conatus_engine.models import (
+    Affect,
+    AgentState,
+    CausalAdequacy,
+    Derivation,
+    IdeaAdequacy,
+    Mode,
+    Transition,
+    WorldEvent,
+)
 
 __all__ = [
     "Affect",
-    "Encounter",
+    "AgentState",
+    "CausalAdequacy",
+    "ConatusEngine",
+    "Derivation",
+    "IdeaAdequacy",
     "Mode",
-    "Person",
-    "evaluate_encounter",
+    "Transition",
+    "WorldEvent",
+    "classify_affect",
+    "classify_mode",
+    "step",
 ]
