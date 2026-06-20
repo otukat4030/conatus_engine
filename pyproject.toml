@@ -1,0 +1,19 @@
+[project]
+name = "conatus-engine"
+version = "0.1.0"
+description = "A small command-line study project translating concepts from Spinoza's Ethics Part III into Python models."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+conatus-engine = "conatus_engine.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
