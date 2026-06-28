@@ -26,6 +26,12 @@ class UsageRun:
     pricing_status: PricingStatus
     estimated_total_cost_usd: Decimal | None
     cost_estimation_note: str | None
+    provider: str | None = None
+    prompt_version: str | None = None
+    schema_version: str | None = None
+    segmentation_json: str | None = None
+    status: str | None = None
+    error_type: str | None = None
 
 
 def default_db_path() -> Path:
@@ -55,6 +61,12 @@ class UsageRepository:
                 CREATE TABLE IF NOT EXISTS analysis_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     created_at TEXT NOT NULL,
+                    provider TEXT,
+                    prompt_version TEXT,
+                    schema_version TEXT,
+                    segmentation_json TEXT,
+                    status TEXT,
+                    error_type TEXT,
                     response_id TEXT,
                     requested_model TEXT,
                     actual_model TEXT,
@@ -82,6 +94,20 @@ class UsageRepository:
                 )
                 """
             )
+            existing = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(analysis_runs)").fetchall()
+            }
+            for column, definition in {
+                "provider": "TEXT",
+                "prompt_version": "TEXT",
+                "schema_version": "TEXT",
+                "segmentation_json": "TEXT",
+                "status": "TEXT",
+                "error_type": "TEXT",
+            }.items():
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE analysis_runs ADD COLUMN {column} {definition}")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS schema_metadata (
@@ -106,6 +132,12 @@ class UsageRepository:
         pricing: PricingSnapshot | None,
         estimate: CostEstimate,
         created_at: datetime | None = None,
+        provider: str | None = None,
+        prompt_version: str | None = None,
+        schema_version: str | None = None,
+        segmentation_json: str | None = None,
+        status: str | None = "succeeded",
+        error_type: str | None = None,
     ) -> int:
         """Save one usage and pricing estimate row."""
 
@@ -114,7 +146,8 @@ class UsageRepository:
             cursor = conn.execute(
                 """
                 INSERT INTO analysis_runs (
-                    created_at, response_id, requested_model, actual_model, service_tier,
+                    created_at, provider, prompt_version, schema_version, segmentation_json,
+                    status, error_type, response_id, requested_model, actual_model, service_tier,
                     input_tokens, cached_input_tokens, uncached_input_tokens, output_tokens,
                     reasoning_tokens, total_tokens, pricing_status, pricing_model,
                     pricing_catalog_version, pricing_effective_from, pricing_retrieved_at,
@@ -122,10 +155,16 @@ class UsageRepository:
                     output_price_per_1m_usd, uncached_input_cost_usd,
                     cached_input_cost_usd, output_cost_usd, estimated_total_cost_usd,
                     cost_estimation_note
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     created_at.isoformat(timespec="seconds"),
+                    provider,
+                    prompt_version,
+                    schema_version,
+                    segmentation_json,
+                    status,
+                    error_type,
                     response_id,
                     requested_model,
                     actual_model,
@@ -194,6 +233,12 @@ class UsageRepository:
                 else Decimal(str(row["estimated_total_cost_usd"]))
             ),
             cost_estimation_note=row["cost_estimation_note"],
+            provider=row["provider"] if "provider" in row.keys() else None,
+            prompt_version=row["prompt_version"] if "prompt_version" in row.keys() else None,
+            schema_version=row["schema_version"] if "schema_version" in row.keys() else None,
+            segmentation_json=row["segmentation_json"] if "segmentation_json" in row.keys() else None,
+            status=row["status"] if "status" in row.keys() else None,
+            error_type=row["error_type"] if "error_type" in row.keys() else None,
         )
 
     def list_usage(self) -> list[UsageRun]:

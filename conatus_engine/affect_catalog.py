@@ -4,6 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
+
+
+SourceAlignment = Literal[
+    "canonical",
+    "translation_variant",
+    "project_extension",
+    "needs_review",
+]
 
 
 class ClassificationKind(str, Enum):
@@ -41,6 +50,7 @@ class AffectDefinition:
     public_domain_text: str
     japanese_translation: str
     summary: str
+    source_alignment: SourceAlignment
 
 
 _NAMES: tuple[tuple[str, str, str, tuple[ClassificationKind, ...], TemporalScope], ...] = (
@@ -70,6 +80,7 @@ _NAMES: tuple[tuple[str, str, str, tuple[ClassificationKind, ...], TemporalScope
     ("Misericordia", "Mercy", "同情", (ClassificationKind.SOCIAL_AFFECT,), TemporalScope.EPISODE),
     ("Acquiescentia in se ipso", "Self-contentment", "自己満足", (ClassificationKind.SELF_APPRAISAL,), TemporalScope.EPISODE),
     ("Humilitas", "Humility", "謙遜", (ClassificationKind.SELF_APPRAISAL,), TemporalScope.EPISODE),
+    ("Poenitentia", "Repentance", "後悔", (ClassificationKind.SELF_APPRAISAL,), TemporalScope.EPISODE),
     ("Superbia", "Pride", "高慢", (ClassificationKind.SELF_APPRAISAL,), TemporalScope.EPISODE),
     ("Abjectio", "Self-abasement", "自己卑下", (ClassificationKind.SELF_APPRAISAL,), TemporalScope.EPISODE),
     ("Gloria", "Honor", "名誉", (ClassificationKind.SOCIAL_AFFECT,), TemporalScope.EPISODE),
@@ -80,18 +91,69 @@ _NAMES: tuple[tuple[str, str, str, tuple[ClassificationKind, ...], TemporalScope
     ("Benevolentia", "Benevolence", "親切", (ClassificationKind.ACTION_TENDENCY,), TemporalScope.EPISODE),
     ("Ira", "Anger", "怒り", (ClassificationKind.ACTION_TENDENCY,), TemporalScope.EPISODE),
     ("Vindicta", "Revenge", "復讐", (ClassificationKind.ACTION_TENDENCY,), TemporalScope.EPISODE),
-    ("Clementia", "Clemency", "寛容", (ClassificationKind.ACTION_TENDENCY,), TemporalScope.EPISODE),
+    ("Crudelitas seu Saevitia", "Cruelty", "残虐", (ClassificationKind.ACTION_TENDENCY,), TemporalScope.EPISODE),
     ("Timor", "Timidity", "小心", (ClassificationKind.ACTION_TENDENCY,), TemporalScope.EPISODE),
     ("Audacia", "Daring", "大胆", (ClassificationKind.ACTION_TENDENCY,), TemporalScope.EPISODE),
     ("Pusillanimitas", "Cowardice", "臆病", (ClassificationKind.ACTION_TENDENCY,), TemporalScope.PERIOD),
     ("Consternatio", "Consternation", "狼狽", (ClassificationKind.ACTION_TENDENCY,), TemporalScope.EPISODE),
-    ("Humanitas", "Courtesy", "人間味", (ClassificationKind.SOCIAL_AFFECT,), TemporalScope.EPISODE),
+    ("Humanitas seu Modestia", "Courtesy", "人間味", (ClassificationKind.SOCIAL_AFFECT,), TemporalScope.EPISODE),
     ("Ambitio", "Ambition", "名誉欲", (ClassificationKind.DESIRE_TENDENCY,), TemporalScope.PERIOD),
     ("Luxuria", "Luxury", "過度な飲食欲", (ClassificationKind.EXCESSIVE_DESIRE_PATTERN,), TemporalScope.LONGITUDINAL),
     ("Ebrietas", "Drunkenness", "過度な飲酒欲", (ClassificationKind.EXCESSIVE_DESIRE_PATTERN,), TemporalScope.LONGITUDINAL),
     ("Avaritia", "Avarice", "富への過度な欲望", (ClassificationKind.EXCESSIVE_DESIRE_PATTERN,), TemporalScope.LONGITUDINAL),
-    ("Libido", "Lust", "過度な性的欲望", (ClassificationKind.EXCESSIVE_DESIRE_PATTERN,), TemporalScope.LONGITUDINAL),
-    ("Desiderium immoderatum", "Immoderate desire", "その他の過度な欲望", (ClassificationKind.EXCESSIVE_DESIRE_PATTERN,), TemporalScope.LONGITUDINAL),
+    ("Libido", "Lust", "肉欲", (ClassificationKind.EXCESSIVE_DESIRE_PATTERN,), TemporalScope.LONGITUDINAL),
+)
+
+
+_JAPANESE_TRANSLATIONS: tuple[str, ...] = (
+    "欲望とは、人間の本質そのものである。ただし、その本質が何らかの自己の変状によって、ある行為へ決定されていると考えられる限りにおいてである。",
+    "喜びとは、人間がより小さい完全性から、より大きい完全性へ移ることである。",
+    "悲しみとは、人間がより大きい完全性から、より小さい完全性へ移ることである。",
+    "驚異とは、精神がある事物の表象にとどまることである。その表象が他の表象と結びつかないためである。",
+    "軽視とは、ある事物の表象が精神にほとんど触れず、その事物の現前が、事物にあるものより、そこにないものを表象させることである。",
+    "愛とは、外的原因の観念を伴う喜びである。",
+    "憎しみとは、外的原因の観念を伴う悲しみである。",
+    "好感とは、偶然に喜びの原因となる事物の観念を伴う喜びである。",
+    "反感とは、偶然に悲しみの原因となる事物の観念を伴う悲しみである。",
+    "心酔とは、私たちが驚異を抱く者への愛である。",
+    "嘲笑とは、私たちが憎むものの中に、軽視する何かがあると表象することから生じる喜びである。",
+    "希望とは、結果についていくらか疑っている未来または過去の事物の観念から生じる、不安定な喜びである。",
+    "恐れとは、結果についていくらか疑っている未来または過去の事物の観念から生じる、不安定な悲しみである。",
+    "安心とは、疑う原因が取り除かれた未来または過去の事物の観念から生じる喜びである。",
+    "絶望とは、疑う原因が取り除かれた未来または過去の事物の観念から生じる悲しみである。",
+    "予期した喜びとは、期待していたよりよく起こった過去の事物の観念を伴う喜びである。",
+    "良心の呵責とは、期待していたより悪く起こった過去の事物の観念を伴う悲しみである。",
+    "憐れみとは、私たちに似ていると表象する他者に起こった害悪の観念を伴う悲しみである。",
+    "好意とは、他者に利益を与えた者への愛である。",
+    "憤慨とは、他者に害悪を与えた者への憎しみである。",
+    "買いかぶりとは、愛のために、ある者を正当以上に高く評価することである。",
+    "見くびりとは、憎しみのために、ある者を正当以下に低く評価することである。",
+    "嫉妬とは、他者の幸福を悲しませ、反対に他者の不幸を喜ばせる限りでの憎しみである。",
+    "同情とは、私たちが憐れむ者に利益を与えようとする欲望である。",
+    "自己満足とは、人間が自己自身とその行為能力を観想することから生じる喜びである。",
+    "謙遜とは、人間が自己の無能力または弱さを観想することから生じる悲しみである。",
+    "後悔とは、私たちが精神の自由な決定によって行ったと信じる行為の観念を伴う悲しみである。",
+    "高慢とは、自己への愛のために、自分を正当以上に高く評価することである。",
+    "自己卑下とは、悲しみのために、自分を正当以下に低く評価することである。",
+    "名誉とは、他者から称賛されると表象する何らかの自己の行為の観念を伴う喜びである。",
+    "恥とは、他者から非難されると表象する何らかの自己の行為の観念を伴う悲しみである。",
+    "懐旧とは、ある事物を所有したいという欲望または衝動である。その事物の記憶によって養われるが、同時にそれを排除する他の事物の記憶によって抑えられる。",
+    "競争心とは、他者がある事物への欲望を持つと表象することによって、私たちのうちに生じる同じ事物への欲望である。",
+    "感謝とは、愛の感情によって、私たちに同じ愛の感情から利益を与えた者に利益を与えようと努める欲望または愛の熱意である。",
+    "親切とは、私たちが憐れむ者に利益を与えようとする欲望である。",
+    "怒りとは、憎しみによって、憎む者に害悪を加えようと駆り立てられる欲望である。",
+    "復讐とは、相互の憎しみによって、同じ感情から私たちに損害を与えた者に害悪を加えようと駆り立てられる欲望である。",
+    "残虐または残忍とは、私たちが愛する者または憐れむ者に害悪を加えようと駆り立てられる欲望である。",
+    "小心とは、より大きな害悪を避けるために、より小さな害悪を欲することである。",
+    "大胆とは、同等の人々が恐れて引き受けない危険なことを行うよう駆り立てる欲望である。",
+    "臆病とは、同等の人々があえて引き受ける害悪への恐れによって、その者の欲望が抑えられることである。",
+    "狼狽とは、避けようとする害悪への驚異によって、その害悪を避ける欲望が抑えられることである。",
+    "人間味または慎みとは、人々を喜ばせることを行い、人々を不快にすることを避けようとする欲望である。",
+    "名誉欲とは、名誉への過度な欲望である。",
+    "過度な飲食欲とは、食事をともにすることへの過度な欲望または愛である。",
+    "過度な飲酒欲とは、飲むことへの過度な欲望または愛である。",
+    "富への過度な欲望とは、富への過度な欲望または愛である。",
+    "肉欲とは、身体を結合させることへの欲望または愛である。",
 )
 
 
@@ -100,16 +162,16 @@ def load_affect_catalog() -> list[AffectDefinition]:
 
     source = "Benedict de Spinoza, Ethics Part III, Definitiones Affectuum; public-domain Latin and Elwes-era English editions consulted."
     rights = "public_domain_source_with_project_translation"
-    evidence = "Spinoza's 17th-century Latin text is public domain; project Japanese text is original provisional wording."
+    evidence = "Spinoza's 17th-century Latin text is public domain; project Japanese text is original wording for this application."
     items: list[AffectDefinition] = []
     for index, (latin, english, japanese, kinds, scope) in enumerate(_NAMES, start=1):
         canonical_id = f"P3-DA-{index:02d}"
         dependencies: tuple[str, ...]
         if index in (1, 2, 3, 4, 5):
             dependencies = ()
-        elif index in (6, 8, 10, 12, 14, 16, 19, 21, 25, 27, 29, 33, 34, 37, 39, 42, 43):
+        elif index in (6, 8, 10, 12, 14, 16, 19, 21, 25, 28, 30, 34, 35, 40, 43):
             dependencies = ("P3-DA-02",)
-        elif index in (7, 9, 11, 13, 15, 17, 18, 20, 22, 23, 24, 26, 28, 30, 35, 36, 38, 40, 41):
+        elif index in (7, 9, 11, 13, 15, 17, 18, 20, 22, 23, 24, 26, 27, 29, 31, 36, 37, 38, 39, 41, 42):
             dependencies = ("P3-DA-03",)
         else:
             dependencies = ("P3-DA-01",)
@@ -130,10 +192,9 @@ def load_affect_catalog() -> list[AffectDefinition]:
                 public_domain_text=(
                     f"Definition {index}: {english} as represented in public-domain editions of Spinoza's Part III affect definitions."
                 ),
-                japanese_translation=(
-                    f"定義{index}: {japanese}。これは原典読解のためのプロジェクト独自の暫定訳です。"
-                ),
+                japanese_translation=f"定義{index}: {_JAPANESE_TRANSLATIONS[index - 1]}",
                 summary=f"{japanese}を、Episode特徴または期間特徴から多ラベルで判定する。",
+                source_alignment="canonical",
             )
         )
     return items

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import json
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from conatus_engine.affect_rules import select_primary_affect
+from conatus_engine.affect_rules import classify_affect_roles
 from conatus_engine.diary_analyzer import (
     AnalyzerResponse,
     MockDiaryAnalyzer,
@@ -38,12 +39,16 @@ class DiaryEntryRecord:
 class EpisodeRecord:
     id: int
     diary_entry_id: int
+    episode_key: str
+    start_char: int
+    end_char: int
+    text: str
     summary: str
-    evidence_text: str
+    increase_intensity: int
+    decrease_intensity: int
     conatus_delta: int
-    power_direction: str
-    intensity: int
-    confidence: float
+    extraction_confidence: float
+    extractor: str
     features_json: str = "{}"
 
 
@@ -53,8 +58,10 @@ class AffectRecord:
     affect_id: str
     japanese_name: str
     status: str
+    role: str
     reason: str
     confidence: float
+    rule_trace_json: str = "{}"
 
 
 @dataclass(frozen=True)
@@ -79,6 +86,106 @@ class LogRow:
     api_cost: str
 
 
+ROLE_LABELS = {
+    "primary": "代表情動",
+    "base": "基礎情動",
+    "coexisting": "併存情動",
+    "candidate": "確認候補",
+    "unclassified": "未分類",
+}
+
+
+def _names_for_role(affects: list[AffectRecord], role: str) -> str:
+    names = [affect.japanese_name for affect in affects if affect.role == role]
+    return ", ".join(names) if names else "なし"
+
+
+def format_episode_detail(
+    episode: EpisodeRecord,
+    affects: list[AffectRecord],
+    *,
+    entry_date: str | None = None,
+) -> str:
+    features = _load_features(episode.features_json)
+    extractor_label = "Mock抽出結果" if episode.extractor == "mock" else "LLM抽出結果"
+    feature_lines = [
+        extractor_label,
+        f"Episode ID: {episode.episode_key}",
+        f"開始位置: {episode.start_char}",
+        f"終了位置: {episode.end_char}",
+        "Episode本文:",
+        episode.text,
+        f"summary: {episode.summary}",
+        f"entities: {_compact_json(features.get('entities', []))}",
+        f"power_components: {_compact_json(features.get('power_components', {}))}",
+        f"causal_links: {_compact_json(features.get('causal_links', []))}",
+        f"entity_stances: {_compact_json(features.get('entity_stances', []))}",
+        f"attention_states: {_compact_json(features.get('attention_states', []))}",
+        f"temporal_appraisal: {_compact_json(features.get('temporal_appraisal', {}))}",
+        f"social_events: {_compact_json(features.get('social_events', []))}",
+        f"appraisals: {_compact_json(features.get('appraisals', []))}",
+        f"action_tendencies: {_compact_json(features.get('action_tendencies', []))}",
+        f"extraction_confidence: {episode.extraction_confidence:.2f}",
+    ]
+    if entry_date:
+        feature_lines.insert(1, f"日付: {entry_date}")
+
+    sections = [
+        *feature_lines,
+        "",
+        "Engine計算結果",
+        f"increase_intensity: {episode.increase_intensity}",
+        f"decrease_intensity: {episode.decrease_intensity}",
+        f"conatus_delta: {episode.conatus_delta}",
+        "",
+        "情動判定結果",
+        *_format_affect_sections(affects),
+        "",
+        "生JSON",
+        _format_features_json(episode.features_json),
+    ]
+    return "\n".join(sections)
+
+
+def _load_features(features_json: str) -> dict[str, object]:
+    try:
+        loaded = json.loads(features_json)
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _format_features_json(features_json: str) -> str:
+    try:
+        return json.dumps(json.loads(features_json), ensure_ascii=False, indent=2)
+    except json.JSONDecodeError:
+        return features_json
+
+
+def _compact_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _format_affect_sections(affects: list[AffectRecord]) -> list[str]:
+    lines: list[str] = []
+    for role, label in ROLE_LABELS.items():
+        role_affects = [affect for affect in affects if affect.role == role]
+        lines.append(f"{label}:")
+        if not role_affects:
+            lines.append("- なし")
+            continue
+        for affect in role_affects:
+            lines.append(
+                f"- {affect.affect_id} {affect.japanese_name} "
+                f"[{affect.status}] role={affect.role} confidence={affect.confidence:.2f}"
+            )
+            lines.append(f"  reason: {affect.reason}")
+            trace = _load_features(affect.rule_trace_json)
+            if trace:
+                lines.append(f"  RuleTrace: {_compact_json(trace)}")
+    return lines
+
+
 class DiaryRepository:
     """SQLite repository for diaries, episodes, and affect assignments."""
 
@@ -92,6 +199,7 @@ class DiaryRepository:
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
+            self._ensure_compatible_schema(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS diary_entries (
@@ -107,13 +215,18 @@ class DiaryRepository:
                 CREATE TABLE IF NOT EXISTS episodes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     diary_entry_id INTEGER NOT NULL,
+                    episode_key TEXT NOT NULL,
+                    start_char INTEGER NOT NULL,
+                    end_char INTEGER NOT NULL,
+                    text TEXT NOT NULL,
                     summary TEXT NOT NULL,
-                    evidence_text TEXT NOT NULL,
+                    features_json TEXT NOT NULL,
+                    increase_intensity INTEGER NOT NULL,
+                    decrease_intensity INTEGER NOT NULL,
                     conatus_delta INTEGER NOT NULL,
-                    power_direction TEXT NOT NULL,
-                    intensity INTEGER NOT NULL,
-                    confidence REAL NOT NULL,
-                    features_json TEXT NOT NULL DEFAULT '{}',
+                    extraction_confidence REAL NOT NULL,
+                    extractor TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
                     FOREIGN KEY(diary_entry_id) REFERENCES diary_entries(id)
                 )
                 """
@@ -126,9 +239,11 @@ class DiaryRepository:
                     affect_id TEXT NOT NULL,
                     japanese_name TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'primary',
                     reason TEXT NOT NULL,
                     confidence REAL NOT NULL,
-                    UNIQUE(episode_id, affect_id, status),
+                    rule_trace_json TEXT NOT NULL DEFAULT '{}',
+                    UNIQUE(episode_id, affect_id, status, role),
                     FOREIGN KEY(episode_id) REFERENCES episodes(id)
                 )
                 """
@@ -142,13 +257,50 @@ class DiaryRepository:
                 )
                 """
             )
+
+    @staticmethod
+    def _ensure_compatible_schema(conn: sqlite3.Connection) -> None:
+        expected_episode_columns = {
+            "id",
+            "diary_entry_id",
+            "episode_key",
+            "start_char",
+            "end_char",
+            "text",
+            "summary",
+            "features_json",
+            "increase_intensity",
+            "decrease_intensity",
+            "conatus_delta",
+            "extraction_confidence",
+            "extractor",
+            "created_at",
+        }
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='episodes'"
+        ).fetchone()
+        if row is not None:
             columns = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(episodes)").fetchall()
+                item[1]
+                for item in conn.execute("PRAGMA table_info(episodes)").fetchall()
             }
-            if "features_json" not in columns:
-                conn.execute(
-                    "ALTER TABLE episodes ADD COLUMN features_json TEXT NOT NULL DEFAULT '{}'"
+            if not expected_episode_columns.issubset(columns):
+                raise RuntimeError(
+                    "このデータベースは現在のバージョンと互換性がありません。"
+                    "既存DBを削除するか、新しいDBパスを設定してください。"
+                )
+        affect_row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='affect_assignments'"
+        ).fetchone()
+        if affect_row is not None:
+            affect_columns = {
+                item[1]
+                for item in conn.execute("PRAGMA table_info(affect_assignments)").fetchall()
+            }
+            if not {"role", "rule_trace_json"}.issubset(affect_columns):
+                raise RuntimeError(
+                    "このデータベースは現在のバージョンと互換性がありません。"
+                    "既存DBを削除するか、新しいDBパスを設定してください。"
                 )
 
     def save_diary(self, entry_date: date, text: str) -> DiaryEntryRecord:
@@ -163,43 +315,57 @@ class DiaryRepository:
     def save_episode(
         self,
         diary_id: int,
+        episode_key: str,
+        start_char: int,
+        end_char: int,
+        text: str,
         summary: str,
-        evidence_text: str,
+        increase_intensity: int,
+        decrease_intensity: int,
         conatus_delta: int,
-        power_direction: str,
-        intensity: int,
-        confidence: float,
+        extraction_confidence: float,
+        extractor: str,
         features_json: str = "{}",
     ) -> EpisodeRecord:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO episodes(
-                    diary_entry_id, summary, evidence_text, conatus_delta,
-                    power_direction, intensity, confidence, features_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    diary_entry_id, episode_key, start_char, end_char, text,
+                    summary, features_json, increase_intensity, decrease_intensity,
+                    conatus_delta, extraction_confidence, extractor, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     diary_id,
+                    episode_key,
+                    start_char,
+                    end_char,
+                    text,
                     summary,
-                    evidence_text,
-                    conatus_delta,
-                    power_direction,
-                    intensity,
-                    confidence,
                     features_json,
+                    increase_intensity,
+                    decrease_intensity,
+                    conatus_delta,
+                    extraction_confidence,
+                    extractor,
+                    datetime.now().isoformat(timespec="seconds"),
                 ),
             )
             episode_id = int(cursor.lastrowid)
         return EpisodeRecord(
             episode_id,
             diary_id,
+            episode_key,
+            start_char,
+            end_char,
+            text,
             summary,
-            evidence_text,
+            increase_intensity,
+            decrease_intensity,
             conatus_delta,
-            power_direction,
-            intensity,
-            confidence,
+            extraction_confidence,
+            extractor,
             features_json,
         )
 
@@ -208,16 +374,19 @@ class DiaryRepository:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO affect_assignments(
-                    episode_id, affect_id, japanese_name, status, reason, confidence
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    episode_id, affect_id, japanese_name, status, role, reason, confidence,
+                    rule_trace_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     affect.episode_id,
                     affect.affect_id,
                     affect.japanese_name,
                     affect.status,
+                    affect.role,
                     affect.reason,
                     affect.confidence,
+                    affect.rule_trace_json,
                 ),
             )
 
@@ -237,7 +406,16 @@ class DiaryRepository:
         where, params = self._date_filter(start_date, end_date)
         params_list = list(params)
         if affect_name:
-            where = self._add_where(where, "a.japanese_name = ?")
+            where = self._add_where(
+                where,
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM affect_assignments af
+                    WHERE af.episode_id = e.id AND af.japanese_name = ?
+                )
+                """,
+            )
             params_list.append(affect_name)
         with self._connect() as conn:
             rows = conn.execute(
@@ -281,9 +459,9 @@ class DiaryRepository:
             rows = conn.execute(
                 f"""
                 SELECT DISTINCT a.japanese_name
-                FROM episodes e
+                FROM affect_assignments a
+                JOIN episodes e ON e.id = a.episode_id
                 JOIN diary_entries d ON d.id = e.diary_entry_id
-                {self._primary_affect_join("a")}
                 {where}
                 {'AND' if where else 'WHERE'} a.japanese_name IS NOT NULL
                 ORDER BY a.japanese_name
@@ -305,25 +483,43 @@ class DiaryRepository:
             ).fetchone()
             if row is None:
                 return None
-            params: list[object] = [diary_id]
-            affect_filter_sql = ""
-            if affect_name:
-                affect_filter_sql = "AND a.japanese_name = ?"
-                params.append(affect_name)
             episodes = conn.execute(
-                f"""
-                SELECT e.id, e.summary, e.evidence_text, e.conatus_delta,
-                       e.power_direction, e.intensity, e.confidence,
-                       a.affect_id, a.japanese_name, a.status, a.reason,
-                       a.confidence AS affect_confidence
+                """
+                SELECT e.id, e.episode_key, e.start_char, e.end_char, e.text,
+                       e.summary, e.increase_intensity, e.decrease_intensity,
+                       e.conatus_delta, e.extraction_confidence, e.extractor,
+                       e.features_json
                 FROM episodes e
-                {self._primary_affect_join("a")}
                 WHERE e.diary_entry_id = ?
-                {affect_filter_sql}
                 ORDER BY e.id
                 """,
-                tuple(params),
+                (diary_id,),
             ).fetchall()
+            affects_by_episode: dict[int, list[sqlite3.Row]] = {int(episode["id"]): [] for episode in episodes}
+            episode_ids = list(affects_by_episode)
+            if episode_ids:
+                placeholders = ", ".join("?" for _ in episode_ids)
+                affect_rows = conn.execute(
+                    f"""
+                    SELECT episode_id, affect_id, japanese_name, status, role, reason,
+                           confidence, rule_trace_json
+                    FROM affect_assignments
+                    WHERE episode_id IN ({placeholders})
+                    ORDER BY
+                        CASE role
+                            WHEN 'primary' THEN 0
+                            WHEN 'base' THEN 1
+                            WHEN 'coexisting' THEN 2
+                            WHEN 'candidate' THEN 3
+                            WHEN 'unclassified' THEN 4
+                            ELSE 5
+                        END,
+                        affect_id
+                    """,
+                    tuple(episode_ids),
+                ).fetchall()
+                for affect in affect_rows:
+                    affects_by_episode[int(affect["episode_id"])].append(affect)
             usage = conn.execute(
                 """
                 SELECT ar.*
@@ -337,22 +533,36 @@ class DiaryRepository:
             ).fetchone()
         episode_lines: list[str] = []
         for episode in episodes:
-            episode_lines.extend(
-                [
-                    f"- Episode {episode['id']}: {episode['summary']}",
-                    f"  日付: {row['entry_date']}",
-                    f"  根拠: {episode['evidence_text']}",
-                    f"  conatus_delta: {episode['conatus_delta']}",
-                    f"  方向: {episode['power_direction']} / 強度: {episode['intensity']} / confidence: {episode['confidence']}",
-                    (
-                        "  代表情動: "
-                        f"{episode['affect_id'] or 'n/a'} {episode['japanese_name'] or 'なし'} "
-                        f"[{episode['status'] or 'なし'}] "
-                        f"confidence={episode['affect_confidence'] if episode['affect_confidence'] is not None else 'n/a'}"
-                    ),
-                    f"  判定理由: {episode['reason'] or 'なし'}",
-                ]
+            record = EpisodeRecord(
+                id=int(episode["id"]),
+                diary_entry_id=diary_id,
+                episode_key=str(episode["episode_key"]),
+                start_char=int(episode["start_char"]),
+                end_char=int(episode["end_char"]),
+                text=str(episode["text"]),
+                summary=str(episode["summary"]),
+                increase_intensity=int(episode["increase_intensity"]),
+                decrease_intensity=int(episode["decrease_intensity"]),
+                conatus_delta=int(episode["conatus_delta"]),
+                extraction_confidence=float(episode["extraction_confidence"]),
+                extractor=str(episode["extractor"]),
+                features_json=str(episode["features_json"]),
             )
+            affect_records = [
+                AffectRecord(
+                    episode_id=int(affect["episode_id"]),
+                    affect_id=str(affect["affect_id"]),
+                    japanese_name=str(affect["japanese_name"]),
+                    status=str(affect["status"]),
+                    role=str(affect["role"]),
+                    reason=str(affect["reason"]),
+                    confidence=float(affect["confidence"]),
+                    rule_trace_json=str(affect["rule_trace_json"]),
+                )
+                for affect in affects_by_episode.get(record.id, [])
+            ]
+            episode_lines.append(f"Episode {record.id}")
+            episode_lines.append(format_episode_detail(record, affect_records, entry_date=str(row["entry_date"])))
         usage_lines = []
         if usage is not None:
             usage_lines = [
@@ -374,7 +584,7 @@ class DiaryRepository:
                 "元の日記",
                 row["text"],
                 "",
-                "Episode一覧" if not affect_name else f"Episode一覧（情動フィルタ: {affect_name}）",
+                "Episode一覧" if not affect_name else f"Episode一覧（情動フィルタ: {affect_name} / 全Episode表示）",
                 *(episode_lines or ["- なし"]),
                 *usage_lines,
             ]
@@ -438,9 +648,9 @@ class DiaryRepository:
             affect_rows = conn.execute(
                 f"""
                 SELECT a.japanese_name, COUNT(*)
-                FROM episodes e
+                FROM affect_assignments a
+                JOIN episodes e ON e.id = a.episode_id
                 JOIN diary_entries d ON d.id = e.diary_entry_id
-                {self._primary_affect_join("a")}
                 {where}
                 {'AND' if where else 'WHERE'} a.status IN ('matched', 'candidate')
                 GROUP BY a.japanese_name
@@ -497,6 +707,11 @@ class DiaryRepository:
             FROM affect_assignments aa
             WHERE aa.episode_id = e.id
             ORDER BY
+                CASE aa.role
+                    WHEN 'primary' THEN 0
+                    WHEN 'unclassified' THEN 1
+                    ELSE 2
+                END,
                 CASE aa.status
                     WHEN 'matched' THEN 0
                     WHEN 'candidate' THEN 1
@@ -550,29 +765,38 @@ class AnalysisService:
         episodes: list[EpisodeRecord] = []
         affects: list[AffectRecord] = []
         for feature in analyzer_response.analysis.episodes:
-            conatus_delta = self._conatus_delta(feature.power_direction, feature.intensity)
+            conatus_delta = (
+                feature.power_components.increase_intensity
+                - feature.power_components.decrease_intensity
+            )
             episode = self.repository.save_episode(
                 diary.id,
+                feature.episode_id,
+                feature.start_char,
+                feature.end_char,
+                feature.text,
                 feature.summary,
-                feature.evidence_text,
+                feature.power_components.increase_intensity,
+                feature.power_components.decrease_intensity,
                 conatus_delta,
-                feature.power_direction,
-                feature.intensity,
-                feature.confidence,
+                feature.extraction_confidence,
+                analyzer_response.provider,
                 feature.model_dump_json(ensure_ascii=False),
             )
             episodes.append(episode)
-            evaluation = select_primary_affect(feature)
-            affect = AffectRecord(
-                episode.id,
-                evaluation.affect_id,
-                evaluation.japanese_name,
-                evaluation.status,
-                evaluation.reason,
-                evaluation.confidence,
-            )
-            affects.append(affect)
-            self.repository.save_affect(affect)
+            for evaluation in classify_affect_roles(feature):
+                affect = AffectRecord(
+                    episode_id=episode.id,
+                    affect_id=evaluation.affect_id,
+                    japanese_name=evaluation.japanese_name,
+                    status=evaluation.status,
+                    role=evaluation.role,
+                    reason=evaluation.reason,
+                    confidence=evaluation.confidence,
+                    rule_trace_json=evaluation.trace.model_dump_json(ensure_ascii=False),
+                )
+                affects.append(affect)
+                self.repository.save_affect(affect)
 
         pricing, pricing_status, note = resolve_pricing(self.model)
         usage = analyzer_response.usage
@@ -589,6 +813,11 @@ class AnalysisService:
             usage=usage,
             pricing=pricing,
             estimate=estimate,
+            provider=analyzer_response.provider,
+            prompt_version=analyzer_response.prompt_version,
+            schema_version="episode-feature-v2",
+            segmentation_json=analyzer_response.segmentation_json,
+            status="succeeded",
         )
         self.repository.link_usage(diary.id, usage_run_id)
         usage_text = (
@@ -606,15 +835,13 @@ class AnalysisService:
             "この金額は保存されたトークン数と料金表から計算した概算です。"
         )
         conatus_total = sum(episode.conatus_delta for episode in episodes)
-        names = ", ".join(affect.japanese_name for affect in affects if affect.status == "matched")
-        candidates = ", ".join(affect.japanese_name for affect in affects if affect.status == "candidate") or "なし"
+        affect_summary = self._affect_summary_by_episode(episodes, affects)
         summary = (
             f"日記ID: {diary.id}\n"
             f"日付: {diary.entry_date}\n"
             f"Episode数: {len(episodes)}\n"
             f"今日のコナトゥス変化: {conatus_total:+d}\n"
-            f"主な情動: {names or 'なし'}\n"
-            f"確認候補: {candidates}\n"
+            f"{affect_summary}\n"
             f"API概算料金: {format_usd(estimate.estimated_total_cost_usd)}"
         )
         return AnalysisResult(diary, episodes, affects, usage_run_id, usage_text, summary)
@@ -633,16 +860,28 @@ class AnalysisService:
         return MockDiaryAnalyzer().analyze(text, model=self.model)
 
     @staticmethod
-    def _conatus_delta(direction: str, intensity: int) -> int:
-        if direction == "increase":
-            return intensity
-        if direction == "decrease":
-            return -intensity
-        return 0
-
-    @staticmethod
     def _fmt_tokens(value: int | None) -> str:
         return "unavailable" if value is None else f"{value:,}"
+
+    @staticmethod
+    def _affect_summary_by_episode(
+        episodes: list[EpisodeRecord], affects: list[AffectRecord]
+    ) -> str:
+        by_episode: dict[int, list[AffectRecord]] = {}
+        for affect in affects:
+            by_episode.setdefault(affect.episode_id, []).append(affect)
+        lines = ["情動判定:"]
+        for index, episode in enumerate(episodes, start=1):
+            episode_affects = by_episode.get(episode.id, [])
+            lines.append(
+                f"- Episode {index}: "
+                f"代表情動: {_names_for_role(episode_affects, 'primary')}; "
+                f"基礎情動: {_names_for_role(episode_affects, 'base')}; "
+                f"併存情動: {_names_for_role(episode_affects, 'coexisting')}; "
+                f"確認候補: {_names_for_role(episode_affects, 'candidate')}; "
+                f"未分類: {_names_for_role(episode_affects, 'unclassified')}"
+            )
+        return "\n".join(lines)
 
 
 class ReportService:

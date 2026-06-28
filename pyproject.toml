@@ -1,7 +1,7 @@
 [project]
 name = "conatus-engine"
 version = "0.4.0"
-description = "A desktop and command-line study project translating concepts from Spinoza's Ethics Part III into Python models."
+description = "A desktop diary-analysis app for conatus changes and Spinoza's Ethics Part III affects."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -20,7 +20,6 @@ dev = [
 
 [project.scripts]
 conatus-engine = "conatus_engine.gui_app:main"
-conatus-engine-cli = "conatus_engine.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

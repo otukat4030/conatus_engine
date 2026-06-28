@@ -14,4 +14,6 @@ screenshots/tmp/
 gui-settings/
 tests/__pycache__/
 conatus_engine/__pycache__/
+conatus_engine/ui/__pycache__/
 conatus_engine/conatus_engine/data/__pycache__
+Ethica.pdf

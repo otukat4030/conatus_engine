@@ -1,174 +1,21 @@
 # Conatus Engine
 
-Conatus Engine は、スピノザ『エチカ』第三部の概念を Python のデータモデル、デスクトップGUI、コマンドライン操作で扱うためのエンジンです。
+Conatus Engine は、日記をもとにコナトゥスの増減と情動を記録するデスクトップGUIアプリです。スピノザ『エチカ』第三部末尾の48情動定義を、OpenAI APIまたはMock Analyzerが抽出した原子的特徴から、Python側の決定論的ルールで評価します。
 
-バージョン `0.4.0` では、既存の状態遷移エンジンに加えて、次の機能を追加しています。
+OpenAI APIは情動名を返しません。APIまたはMockの役割は、日記をEpisodeへ分割し、人物・原因・対象・行為・時間・関係を抽出することです。`conatus_engine` の役割は、その抽出値を検証し、48情動をすべて評価して、代表情動・基礎情動・併存情動・確認候補を決めることです。
 
-- 『エチカ』第三部末尾の `Definitiones Affectuum` にある番号付き情動定義 48 件のカタログ
-- OpenAI API の usage 情報にもとづくトークン数と概算料金の記録・表示
-- PySide6 によるデスクトップGUI
-
-API料金機能は、OpenAI API のレスポンスに含まれる usage 情報と、ローカルの料金表を使って概算額を計算します。請求書や最終請求額を取得するものではありません。
-
-## 日記解析の流れ
-
-`openai` モードでは、GUIの「保存して解析」で入力した日記本文を OpenAI Responses API に送信します。APIには情動名を直接決めさせず、日記から観察できるEpisode特徴だけを Structured Outputs として返させます。返ってきた特徴を `conatus_engine` の48情動ルールエンジンが判定し、Episodeごとに代表情動を1件だけ保存・表示します。
-
-```mermaid
-flowchart TD
-    A[日記本文] --> B[OpenAI Responses API<br/>Structured Outputs]
-    B --> C[DiaryAnalysisSchema<br/>episodes[]]
-    C --> D[Episode特徴<br/>要約・根拠・力能方向・強度・観察フラグ]
-    D --> E[conatus_delta計算<br/>increase=+intensity / decrease=-intensity]
-    D --> F[48情動ルールを全評価]
-    F --> G[Episodeごとに代表情動を1件選択]
-    E --> H[GUI/SQLite出力]
-    G --> H
-    B --> I[usage情報<br/>トークン数]
-    I --> J[概算料金計算]
-    J --> H
-```
-
-APIから受け取る主な出力は、`DiaryAnalysisSchema` の `episodes` 配列です。1つの日記から複数のEpisodeが抽出されることがあります。各Episodeには、次のような特徴が入ります。
-
-- `summary`: Episodeの短い要約
-- `evidence_text`: 日記本文中の根拠
-- `power_direction`: コナトゥスが増加したか、減少したか、中立か
-- `intensity`: 0から5の強度
-- `confidence`: 抽出の確信度
-- `desire_present`, `external_cause`, `target_present`, `gratitude`, `anger`, `remorse` など、48情動ルールが参照する観察フラグ
-
-`conatus_engine` はこのAPI出力から `conatus_delta` を計算します。`increase` は `+intensity`、`decrease` は `-intensity`、`neutral` と `unknown` は `0` です。そのうえで48情動定義をすべて決定論的に評価し、`matched` を優先、次に `candidate` を優先して、1つのEpisodeに1つの代表情動を割り当てます。必要な意味情報が不足している場合は、無理に「欲望」などへ分類せず、`未分類` として扱います。
-
-最終的な出力は、日記タブの解析サマリー、Episode一覧、情動ログ、情動別グラフ、コナトゥス時系列、SQLite保存データ、OpenAI APIのトークン数と概算料金です。情動ログの一覧は日記単位で表示します。期間と情動名で絞り込み、選択した日記の本文、該当Episode、日付、判定理由を確認できます。
-
-## 変更点
-
-以前は混ざっていた次の二つの概念を分離しています。
-
-- `CausalAdequacy`: 結果が、その主体自身の本性と力から十分に説明できるか
-- `IdeaAdequacy`: 主体が、その出来事の原因を十分に理解しているか
-
-能動・受動の判定は `CausalAdequacy` だけから行います。
-
-- `adequate` な因果的十分性 -> `active`
-- `partial` な因果的十分性 -> `passive`
-
-`IdeaAdequacy` は独立した情報として記録されます。これにより、外的な出来事の原因を理解していても、その結果の十分な原因が本人ではない、というケースを表現できます。
-
-## 中核モデル
-
-- `AgentState`: ある時点における主体の状態
-- `WorldEvent`: 主体の力能を変化させる出来事
-- `Transition`: ひとつの出来事を状態へ適用した前後の結果
-- `Derivation`: 結果を説明する規則適用の履歴
-
-`power_delta` は入力値として与えます。エンジンはその値をもとに状態遷移、情動、能動・受動、導出履歴を計算します。力能は有限の実数として扱います。
-
-## Python API
-
-```python
-from conatus_engine import (
-    AgentState,
-    CausalAdequacy,
-    IdeaAdequacy,
-    WorldEvent,
-    step,
-)
-
-state = AgentState(agent_id="agent-1", name="Spinoza", power=10.0)
-event = WorldEvent(
-    event_id="event-1",
-    description="A clear but externally caused event",
-    power_delta=-2.0,
-    causal_adequacy=CausalAdequacy.PARTIAL,
-    idea_adequacy=IdeaAdequacy.ADEQUATE,
-)
-
-transition = step(state, event)
-
-assert transition.before == state
-assert transition.after.power == 8.0
-assert transition.affect.value == "sadness"
-assert transition.mode.value == "passive"
-assert transition.idea_adequacy.value == "adequate"
-assert len(transition.derivations) >= 4
-```
-
-ラッパークラスも使えます。
-
-```python
-from conatus_engine import ConatusEngine
-
-transition = ConatusEngine().step(state, event)
-```
-
-## JSON
-
-`AgentState`, `WorldEvent`, `Transition` は、JSON互換の辞書とJSON文字列へ変換できます。
-
-```python
-data = transition.to_dict()
-json_text = transition.to_json()
-restored = transition.from_json(json_text)
-assert restored == transition
-```
-
-状態遷移JSONの例:
-
-```json
-{
-  "before": {"agent_id": "agent-1", "name": "Spinoza", "power": 10.0},
-  "after": {"agent_id": "agent-1", "name": "Spinoza", "power": 8.0},
-  "event": {
-    "event_id": "event-1",
-    "description": "A clear but externally caused event",
-    "power_delta": -2.0,
-    "causal_adequacy": "partial",
-    "idea_adequacy": "adequate"
-  },
-  "affect": "sadness",
-  "mode": "passive",
-  "idea_adequacy": "adequate",
-  "derivations": [
-    {
-      "rule_id": "power.update",
-      "premises": ["before.power=10.0", "event.power_delta=-2.0"],
-      "conclusion": "after.power=8.0",
-      "explanation": "出来事に与えられた力能変化量を現在の力能に加算します。"
-    }
-  ]
-}
-```
-
-## GUI
-
-次のコマンドでデスクトップGUIを起動できます。
+## 起動
 
 ```bash
 python -m conatus_engine
 ```
 
-インストール後は、次のコマンドも使えます。
+インストールして使う場合:
 
 ```bash
 pip install -e .
 conatus-engine
 ```
-
-GUIには3つのタブがあります。
-
-- `日記`: 日付と日記本文を入力し、保存または解析を実行します。解析結果、Episode一覧、API usage、概算料金を表示します。
-- `情動ログ`: 保存済み日記を期間と情動名で絞り込み、日記単位の行として表示します。行選択で元の日記・該当Episode・代表情動・API使用量の詳細を表示します。選択した日記ログの削除もできます。情動別件数とコナトゥス時系列はMatplotlibグラフで表示します。
-- `設定`: 解析モード、使用モデル、SQLiteデータベースパス、料金表情報、USD/JPY換算レート、月間API予算、APIキー入力、OpenAI接続確認を扱います。
-
-APIキー入力欄は伏せ字表示です。保存を選んだ場合はOSのkeyringへ保存します。QSettings、SQLite、README、ログへAPIキーを平文保存しません。keyringが利用できない場合、平文ファイルへのフォールバック保存は行いません。
-
-解析モードは `mock` と `openai` を選択できます。`mock` はネットワークを使わないデモ・テスト用です。`openai` はOpenAI Responses APIのStructured Outputsを使い、日記本文からEpisode特徴を抽出します。抽出された特徴はPython側の48情動ルールエンジンへ渡され、Episodeごとに代表情動が1件選ばれます。使用モデルは設定タブのコンボボックスから選択できます。
-
-設定タブの `接続確認` は実際にOpenAI APIへ短いリクエストを送信します。少額の利用料金が発生する場合があります。レート制限や利用上限に達した場合は、時間を置くか、別モデルを選択してください。
-
-日記をOpenAI APIで解析する場合、日記本文はAPIへ送信されます。SQLiteには日記本文が平文で保存されます。このアプリは医療・心理診断を目的としません。
 
 GUIを起動してすぐ閉じる確認には、次を使えます。
 
@@ -176,188 +23,277 @@ GUIを起動してすぐ閉じる確認には、次を使えます。
 python -m conatus_engine --quit-after-start
 ```
 
-## CLI
+## 日記解析の流れ
 
-既存のCLIは別エントリーポイントとして残しています。
-
-```bash
-python -m conatus_engine.cli --help
-conatus-engine-cli --help
+```mermaid
+flowchart TD
+    A["日記本文"] --> B["Episode分割"]
+    B --> C["Episode本文と文字位置を検証"]
+    C --> D["人物・原因・対象・行為・時間・関係を抽出"]
+    D --> E["EvidenceSpanとentity_idを検証"]
+    E --> F["increase_intensity - decrease_intensity を計算"]
+    E --> G["48情動ルールをすべて評価"]
+    G --> H["RuleTraceを生成"]
+    H --> I["代表・基礎・併存・候補へ分類"]
+    F --> J["SQLiteとGUIへ保存・表示"]
+    I --> J
 ```
 
-引数なしで起動すると、CLIは最初に `AgentState` の初期値として人物名と現在の力能を尋ねます。入力された人物名は内部の `agent_id` としても使われます。その後、出来事を順に入力するループに入り、各 `WorldEvent` が現在状態へ適用され、結果の `after` 状態が次の現在状態になります。
+Episodeごとの抽出値は、次の9ブロックを中心に保存されます。
 
-各出来事について、CLIは次の二点を個別に尋ねます。
+- `entities`: 書き手、人物、対象、出来事
+- `power_components`: 力能の増大・減少の強度
+- `causal_links`: 増大・減少・欲望の原因
+- `entity_stances`: 対象への接近・回避などの姿勢
+- `attention_states`: 驚異や軽視につながる注意状態
+- `temporal_appraisal`: 過去・現在・未来、不確実性、期待との関係
+- `social_events`: 誰が誰に利益・害・幸不幸を与えたか
+- `appraisals`: 自己・行為・他者への評価
+- `action_tendencies`: 欲する、助ける、害する、避ける、自制するなどの行為傾向
 
-- その結果が、人物自身の本性・力から十分に説明できるか
-- その人物が、出来事の原因を十分に理解しているか
-
-実行例:
+`conatus_delta` は次で計算します。
 
 ```text
-人物名: Spinoza
-現在の力能: 10
-
---- 現在の状態: Spinoza / power=10.0 ---
-新しい出来事を入力しますか？ (y/n): y
-イベントID: event-1
-出来事の説明: 外的な出来事の原因を正しく理解した
-出来事による力能の変化量: -2
-この結果は、その人物自身の本性・力から十分に説明できますか？ (y/n): n
-その人物は、出来事の原因を十分に理解していますか？ (y/n): y
+conatus_delta = increase_intensity - decrease_intensity
 ```
 
-出力には、更新前後の力能、情動、能動・受動、因果的十分性、観念の十分性、導出履歴が含まれます。
+情動判定では、各Episodeについて48情動をすべて評価し、条件の成立状況を `RuleTrace` に残します。成立する情動がない場合は、無理に「欲望」へ寄せず `未分類` とします。
 
-## サブコマンド
+## 少数のパラメータから48情動を分類する考え方
 
-情動カタログ:
+## 基本方針
 
-```bash
-python -m conatus_engine.cli affect validate
-python -m conatus_engine.cli affect list --all
-python -m conatus_engine.cli affect show P3-DA-22
-python -m conatus_engine.cli affect graph
-```
+48個の情動をLLMへ直接分類させるのではなく、日記から観察できる少数の原子的パラメータだけをLLMに抽出させる。
 
-OpenAI API料金表:
-
-```bash
-python -m conatus_engine.cli pricing validate
-python -m conatus_engine.cli pricing list
-python -m conatus_engine.cli pricing show gpt-5.4-mini
-```
-
-OpenAI API usage:
-
-```bash
-python -m conatus_engine.cli usage demo --db ./usage-demo.sqlite3
-python -m conatus_engine.cli usage show 1 --db ./usage-demo.sqlite3
-python -m conatus_engine.cli usage report --period month --date 2026-06-01 --db ./usage-demo.sqlite3
-```
-
-`usage demo` は固定されたローカルのモック値を使います。OpenAI APIは呼び出しません。
-
-## 入力値の検証
-
-モデルは空のIDや名前を拒否します。力能と力能変化量は有限の数値である必要があります。`NaN`、正の無限大、負の無限大は `ValueError` になります。
-
-## 情動定義カタログ
-
-`affect` コマンドは、`P3-DA-01` から `P3-DA-48` までの 48 件の番号付き情動定義を扱います。
-
-情動名は表示用メタデータであり、安定した識別子ではありません。正規IDには『エチカ』第三部と定義番号にもとづく `P3-DA-XX` 形式を使います。
-
-各行には次の情報が含まれます。
-
-- ラテン語名
-- 英語表示名
-- 日本語表示名
-- 分類種別
-- 時間スコープ
-- 依存関係
-- ルールID
-- 出典情報
-- 権利情報
-- 日本語訳
-
-長期的な傾向を表す情動は `longitudinal` スコープとして区別します。単一の出来事から人物の固定的な性格を断定するための分類ではありません。
-
-日本語の文言は、このプロジェクトで作成した訳文です。現代日本語訳からの転載ではありません。
-
-48情動ルールエンジンは、OpenAIまたはMock解析器が返した観察特徴を入力として、全48定義を決定論的に評価します。保存と通常表示では、1つのEpisodeに対して代表情動を1件だけ選びます。根拠が足りないEpisodeは `未分類` として残し、48情動のどれかへ強制的には割り当てません。`affect validate` はカタログだけでなく、この48件すべてのルールが実行可能であることも検証します。
-
-## OpenAI API usage と概算料金
-
-OpenAI APIの利用料金は、ChatGPTのサブスクリプションとは別に扱われます。このプロジェクトでは、APIレスポンスの usage 情報から次を保存・表示できます。
-
-- 入力トークン
-- キャッシュ入力トークン
-- 非キャッシュ入力トークン
-- 出力トークン
-- reasoning tokens
-- 合計トークン
-
-料金は `Decimal` を使って次の式で計算します。
+その後、`conatus_engine` がパラメータの組み合わせを決定論的に評価し、48情動を分類する。
 
 ```text
-uncached_input_tokens / 1_000_000 * input_price_per_1m_usd
-+ cached_input_tokens / 1_000_000 * cached_input_price_per_1m_usd
-+ output_tokens / 1_000_000 * output_price_per_1m_usd
+日記
+  ↓
+LLMによる原子的特徴の抽出
+  ↓
+conatus_engineによるルール評価
+  ↓
+48情動の分類
 ```
 
-reasoning tokens は通常、出力トークンの内訳として扱われます。そのため、出力トークンへ追加して二重計上しません。
+## LLMが抽出する主なパラメータ
 
-料金表ファイル:
+### 1. 人物・対象
+
+* 誰が主体か
+* 誰・何が原因か
+* 誰・何が行為や評価の対象か
+* 同じ対象か、別の対象か
+
+### 2. 力能の変化
+
+* 力能の増大
+* 力能の減少
+* それぞれの強度
+
+増大と減少は同時に存在してよい。
+
+### 3. 原因
+
+* 自分自身によるものか
+* 外的な直接原因か
+* 偶然的・間接的な原因か
+* 原因が不明か
+
+### 4. 対象への方向性
+
+* 肯定的
+* 否定的
+* 両価的
+* 中立
+* 不明
+
+### 5. 注意の状態
+
+* 新奇な対象への注意の固定
+* 対象を取るに足らないものとして見る
+* 通常の注意
+
+### 6. 時間と確実性
+
+* 過去・現在・未来
+* 記憶・知覚・予期
+* 不確実か、疑いが解消されたか
+* 結果が期待より良かったか悪かったか
+* 欲望の対象が存在するか、失われたか
+
+### 7. 社会的な出来事
+
+* 誰が誰を助けたか
+* 誰が誰を害したか
+* 誰に幸運・不幸が起きたか
+* その対象を自分と似た存在として捉えているか
+
+### 8. 評価
+
+* 自分の力への評価
+* 自分自身への評価
+* 自分の行為への評価
+* 他者への評価
+* 過大評価・過小評価
+* 称賛・非難されるという想像
+
+### 9. 行為傾向
+
+* 接近したい
+* 所有したい
+* 避けたい
+* 助けたい
+* 害したい
+* 害を与えるのを抑えたい
+* 他者を喜ばせたい
+* 評価を得たい
+* 行為が実行・阻止・抑制されたか
+* 他者を模倣した欲望か
+* 欲望の対象領域は何か
+
+## 情動はパラメータの組み合わせとして表す
+
+例として、次のように構成する。
 
 ```text
-conatus_engine/data/model_pricing.json
+喜び
+= 力能の増大
+
+悲しみ
+= 力能の減少
+
+愛
+= 力能の増大
++ 外的な直接原因
+
+憎しみ
+= 力能の減少
++ 外的な直接原因
+
+希望
+= 力能の増大
++ 過去または未来
++ 結果が不確実
+
+恐れ
+= 力能の減少
++ 過去または未来
++ 結果が不確実
+
+感謝
+= 他者から利益を受けた
++ その相手への肯定的方向性
++ 相手へ利益を返したい行為傾向
+
+復讐
+= 他者から害を受けた
++ その相手への否定的方向性
++ 同じ相手を害したい行為傾向
+
+心酔
+= 愛
++ 同じ対象への注意の固定
 ```
 
-料金表では、単価を10進文字列として保存します。あわせて、参照元、取得日、service tier、context band を保持します。未知のモデル名には似た名前の料金を推測適用せず、`unknown_model` として扱います。
+## 複数情動を許容する
 
-usage の保存にはSQLiteを使います。保存先は `CONATUS_DB_PATH` または `--db` で指定できます。データベースはローカルに保存されます。
+1つのEpisodeには、複数の情動が同時に成立してよい。
 
-実際の請求額は OpenAI の請求画面または利用状況画面で確認してください。トークン以外の追加料金は、明示的にモデル化されていない限り、この概算には含まれません。
+```text
+同僚に助けてもらって、ありがたく嬉しかった
 
-## インストール
+喜び
+= 力能の増大
 
-Python `3.12` 以上が必要です。
+愛
+= 力能の増大
++ 同僚が外的原因
 
-```bash
-uv sync --extra dev
+感謝
+= 同僚から利益を受けた
++ 同僚への肯定的方向性
++ 同僚へ利益を返したい
+```
+
+この場合、例えば次のように整理する。
+
+```text
+代表情動: 感謝
+基礎情動: 喜び
+併存情動: 愛
+```
+
+## 期間を必要とする情動
+
+臆病、名誉欲、過度な飲食欲などは、単一Episodeだけでは確定しない。
+
+```text
+Episode単体
+  → candidate
+
+一定期間の反復
+  → matched
+```
+
+そのため、LLMは各Episodeの特徴だけを抽出し、反復性や持続性は `conatus_engine` が日記履歴から集約する。
+
+## この設計の利点
+
+* LLMへ情動名を直接選ばせない
+* 情動分類の根拠を追跡できる
+* 同じ入力に対する揺れを抑えやすい
+* 複数情動を自然に扱える
+* 48情動のルールをPython側で検証できる
+* LLMモデルを変更しても分類基準を維持できる
+
+## 要点
+
+```text
+LLMの役割
+= 人物・原因・対象・行為・時間・関係を抽出する
+
+conatus_engineの役割
+= 原子的パラメータの組み合わせから48情動を導出する
+```
+
+情動を直接予測するのではなく、情動を構成する意味要素へ分解することが、この設計の中心である。
+
+## 解析モード
+
+`設定` タブで解析モードを選べます。
+
+- `mock`: 外部APIを呼ばず、決定論的なキーワードルールで新Schemaを生成します。GUI、DB、48情動ルールの動作確認や自動テスト用です。実API usageは保存せず、料金は `unavailable` になります。
+- `openai`: OpenAI Responses APIのStructured Outputsを使います。日記をEpisodeへ分割した後、各Episodeの原子的特徴を抽出します。Responses API呼び出しでは `store=False` を指定します。
+
+OpenAI APIで解析する場合、日記本文はAPIへ送信されます。SQLiteには日記本文と解析結果が平文で保存されます。このアプリは医療・心理診断を目的としません。
+
+## GUI
+
+GUIには3つのタブがあります。
+
+- `日記`: 日付と本文を入力し、保存または解析します。解析後はEpisode一覧、抽出値、Engine計算値、情動判定、RuleTrace、生JSON、API使用量を確認できます。
+- `情動ログ`: 保存済み日記を期間と情動名で絞り込みます。一覧は日記単位で表示し、詳細では日記本文とすべてのEpisodeを確認できます。`詳細を開く` ではスクロール可能な詳細画面を開きます。
+- `設定`: 解析モード、使用モデル、SQLiteパス、料金表情報、USD/JPY換算レート、月間API予算、APIキー、OpenAI接続確認を扱います。
+
+APIキー入力欄は伏せ字表示です。保存する場合はOSのkeyringへ保存します。QSettings、SQLite、README、ログへAPIキーを平文保存しません。
+
+## データベース互換性
+
+このバージョンは旧Schema・旧SQLiteデータベースと互換性がありません。アップデート時は、既存SQLiteファイルを削除するか、`設定` タブで新しいDBパスを指定してください。
+
+旧DBを検出した場合、アプリは変換せず次の意味のエラーを出します。
+
+```text
+このデータベースは現在のバージョンと互換性がありません。
+既存DBを削除するか、新しいDBパスを設定してください。
 ```
 
 ## テスト
 
-開発用依存関係を入れてテストを実行します。
-
-```bash
-pip install -e ".[dev]"
-pytest
-```
-
-`uv` を使う場合:
-
 ```bash
 uv run pytest
 ```
 
-ヘッドレス環境でGUIテストを実行する場合:
-
-```bash
-set QT_QPA_PLATFORM=offscreen
-uv run pytest
-```
-
-スクリーンショットを保存する場合は `screenshots/` 配下を使ってください。一時出力は `screenshots/tmp/` に置く想定です。
-
-## プロジェクト構成
-
-```text
-conatus_engine/
-  __init__.py
-  __main__.py
-  affect_catalog.py
-  cli.py
-  engine.py
-  gui_app.py
-  gui_services.py
-  models.py
-  pricing.py
-  serialization.py
-  usage_store.py
-  ui/
-    main_window.py
-  data/
-    model_pricing.json
-tests/
-  test_affect_catalog.py
-  test_engine.py
-  test_models.py
-  test_pricing.py
-  test_serialization.py
-  test_usage_store.py
-pyproject.toml
-README.md
-```
+テストは外部APIへ接続しません。OpenAI Analyzerのテストはfake clientで、segmentation、feature extraction、`store=False`、1回だけの修正リクエストを確認します。

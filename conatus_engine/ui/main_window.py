@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateEdit,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -38,6 +40,7 @@ from conatus_engine.gui_services import (
     DiaryService,
     ReportService,
     SettingsService,
+    format_episode_detail,
 )
 from conatus_engine.usage_store import default_db_path
 
@@ -122,6 +125,27 @@ class ConnectionTestThread(QThread):
             self.failed.emit(f"接続確認に失敗しました: {type(exc).__name__}")
 
 
+class TextDetailDialog(QDialog):
+    """Resizable scrollable dialog for long diary details."""
+
+    def __init__(self, title: str, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(900, 700)
+
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setPlainText(text)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout()
+        layout.addWidget(view)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+
 class DiaryTab(QWidget):
     """Diary input and result tab."""
 
@@ -133,6 +157,7 @@ class DiaryTab(QWidget):
         self.settings = settings
         self.worker: AnalysisThread | None = None
         self.api_key_provider = lambda: None
+        self._episode_detail_texts: dict[int, str] = {}
 
         self.date_edit = QDateEdit()
         self.date_edit.setCalendarPopup(True)
@@ -152,10 +177,13 @@ class DiaryTab(QWidget):
         self.result_view.setReadOnly(True)
         self.usage_view = QTextEdit()
         self.usage_view.setReadOnly(True)
-        self.episode_table = QTableWidget(0, 7)
+        self.episode_table = QTableWidget(0, 9)
         self.episode_table.setHorizontalHeaderLabels(
-            ["要約", "根拠", "conatus", "方向", "強度", "情動", "confidence"]
+            ["episode_id", "要約", "increase", "decrease", "conatus", "代表情動", "基礎情動", "併存情動", "confidence"]
         )
+        self.episode_table.setColumnHidden(0, True)
+        self.episode_detail = QTextEdit()
+        self.episode_detail.setReadOnly(True)
 
         form = QFormLayout()
         form.addRow("日付", self.date_edit)
@@ -174,6 +202,8 @@ class DiaryTab(QWidget):
         right.addWidget(self.usage_view, 1)
         right.addWidget(QLabel("Episode一覧"))
         right.addWidget(self.episode_table, 2)
+        right.addWidget(QLabel("選択Episode詳細"))
+        right.addWidget(self.episode_detail, 3)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         left_widget = QWidget()
@@ -192,6 +222,7 @@ class DiaryTab(QWidget):
         self.text_edit.textChanged.connect(self._update_char_count)
         self.save_button.clicked.connect(self.save_diary)
         self.analyze_button.clicked.connect(self.analyze_diary)
+        self.episode_table.itemSelectionChanged.connect(self._episode_selected)
 
     def _db_path(self) -> Path:
         return Path(self.settings.value("db_path", str(default_db_path())))
@@ -252,28 +283,55 @@ class DiaryTab(QWidget):
         self.result_view.setPlainText(result.summary_text)
         self.usage_view.setPlainText(result.usage_text)
         self.episode_table.setRowCount(0)
-        affects_by_episode: dict[int, list[str]] = {}
+        self.episode_detail.clear()
+        self._episode_detail_texts = {}
+        primary_by_episode: dict[int, list[str]] = {}
+        base_by_episode: dict[int, list[str]] = {}
+        coexisting_by_episode: dict[int, list[str]] = {}
+        affect_records_by_episode = {}
         for affect in result.affects:
-            affects_by_episode.setdefault(affect.episode_id, []).append(
-                f"{affect.japanese_name}({affect.status})"
-            )
-        for episode in result.episodes:
+            affect_records_by_episode.setdefault(affect.episode_id, []).append(affect)
+            if affect.role in {"primary", "unclassified"}:
+                primary_by_episode.setdefault(affect.episode_id, []).append(
+                    f"{affect.japanese_name}({affect.status})"
+                )
+            elif affect.role == "base":
+                base_by_episode.setdefault(affect.episode_id, []).append(affect.japanese_name)
+            elif affect.role == "coexisting":
+                coexisting_by_episode.setdefault(affect.episode_id, []).append(affect.japanese_name)
+        for index, episode in enumerate(result.episodes, start=1):
             row = self.episode_table.rowCount()
             self.episode_table.insertRow(row)
             values = [
-                episode.summary,
-                episode.evidence_text,
+                episode.id,
+                episode.summary or f"Episode {index}",
+                str(episode.increase_intensity),
+                str(episode.decrease_intensity),
                 str(episode.conatus_delta),
-                episode.power_direction,
-                str(episode.intensity),
-                ", ".join(affects_by_episode.get(episode.id, [])),
-                f"{episode.confidence:.2f}",
+                ", ".join(primary_by_episode.get(episode.id, [])),
+                ", ".join(base_by_episode.get(episode.id, [])) or "なし",
+                ", ".join(coexisting_by_episode.get(episode.id, [])) or "なし",
+                f"{episode.extraction_confidence:.2f}",
             ]
             for col, value in enumerate(values):
-                self.episode_table.setItem(row, col, QTableWidgetItem(value))
+                self.episode_table.setItem(row, col, QTableWidgetItem(str(value)))
+            self._episode_detail_texts[episode.id] = format_episode_detail(
+                episode, affect_records_by_episode.get(episode.id, [])
+            )
         self.episode_table.resizeColumnsToContents()
+        self.episode_table.setColumnHidden(0, True)
+        if result.episodes:
+            self.episode_table.selectRow(0)
         self.status_message.emit("解析が完了しました")
         self.analysis_finished.emit()
+
+    def _episode_selected(self) -> None:
+        items = self.episode_table.selectedItems()
+        if not items:
+            return
+        row = items[0].row()
+        episode_id = int(self.episode_table.item(row, 0).text())
+        self.episode_detail.setPlainText(self._episode_detail_texts.get(episode_id, ""))
 
     def _analysis_failed(self, message: str) -> None:
         QMessageBox.critical(self, "解析エラー", message)
@@ -477,7 +535,7 @@ class LogTab(QWidget):
         if not text.strip():
             self._row_selected()
             text = self.detail.toPlainText()
-        QMessageBox.information(self, "日記ログ詳細", text or "行を選択してください。")
+        TextDetailDialog("日記ログ詳細", text or "行を選択してください。", self).exec()
 
     def delete_selected_diary(self) -> None:
         items = self.table.selectedItems()
