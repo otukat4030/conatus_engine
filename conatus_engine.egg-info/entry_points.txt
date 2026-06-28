@@ -1,0 +1,2 @@
+[console_scripts]
+conatus-engine = conatus_engine.cli:main

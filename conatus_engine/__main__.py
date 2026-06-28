@@ -1,4 +1,4 @@
-from conatus_engine.cli import main
+from conatus_engine.gui_app import main
 
 
 if __name__ == "__main__":
